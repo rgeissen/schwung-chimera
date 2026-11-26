@@ -80,6 +80,7 @@ extern uint32_t chm_cursor(Handle *h);
 extern double chm_speak_elapsed(Handle *h);
 extern uint64_t chm_view_serial(Handle *h);
 extern size_t chm_view(Handle *h, uint8_t *buf, size_t cap);
+extern size_t chm_live_mod(Handle *h, double *out, size_t max);
 
 static const host_api_v1_t *g_host;
 
@@ -144,6 +145,10 @@ typedef struct {
     char view[VIEW_MAX];
     _Atomic uint32_t cursor;      /* Sing: the syllable the next key sings */
     _Atomic int64_t speak_start;  /* Speak: audio position the line started at, -1: silent */
+    /* live_mod: each mouth knob where the voice has it now (0..1, double bits; NaN: not a mouth
+     * knob), and whether the voice sounds (a block above -80 dB within the last 32) */
+    _Atomic uint64_t live[CP_COUNT];
+    _Atomic int live_on;
 
     /* ---- shared flags */
     _Atomic int ready; /* the engine exists and has the state */
@@ -389,6 +394,7 @@ static void *worker(void *arg) {
     struct timespec last_cfg;
     clock_gettime(CLOCK_MONOTONIC, &last_cfg);
     int failed = 0;
+    int quiet = 1 << 20; /* live_mod: blocks rendered since the last one above -80 dB */
     while (!atomic_load(&in->stop)) {
         /* settings, about once a second (the file is tiny; this is not the callback) */
         struct timespec now;
@@ -434,6 +440,9 @@ static void *worker(void *arg) {
             uint64_t r = atomic_load_explicit(&in->aud_r, memory_order_acquire);
             if ((int64_t)(w - r) >= kBufferBlocks[cfg.buffer] * BLOCK) break;
             chm_render(h, buf, BLOCK);
+            float peak = 0.0f; /* live_mod: does the voice sound */
+            for (int i = 0; i < BLOCK; ++i) peak = fabsf(buf[i]) > peak ? fabsf(buf[i]) : peak;
+            quiet = peak > 1e-4f ? 0 : quiet < (1 << 20) ? quiet + 1 : quiet;
             for (int i = 0; i < BLOCK; ++i) in->audio[(w + (uint64_t)i) & (AUDIO_CAP - 1)] = buf[i];
             w += BLOCK;
             atomic_store_explicit(&in->aud_w, w, memory_order_release);
@@ -457,6 +466,13 @@ static void *worker(void *arg) {
             atomic_store_explicit(&in->view_seq, s + 2, memory_order_release);
         }
         atomic_store_explicit(&in->cursor, chm_cursor(h), memory_order_relaxed);
+        {   /* live_mod: the mouth as the last block rendered left it */
+            double lm[CP_COUNT];
+            size_t nl = chm_live_mod(h, lm, CP_COUNT);
+            for (size_t i = 0; i < CP_COUNT; ++i)
+                atomic_store_explicit(&in->live[i], dbits(i < nl ? lm[i] : NAN), memory_order_relaxed);
+            atomic_store_explicit(&in->live_on, quiet < 32, memory_order_relaxed);
+        }
         double el = chm_speak_elapsed(h);
         atomic_store_explicit(&in->speak_start, el < 0 ? -1 : (int64_t)w - (int64_t)llround(el * in->sr), memory_order_relaxed);
 
@@ -873,6 +889,23 @@ static int get_param(void *instance, const char *key, char *buf, int len) {
         return outf(buf, len, "%.4f", s);
     }
     if (!strcmp(key, "sweep:base")) return outf(buf, len, "%.4f", in->val[CP_SWEEP]);
+    /* Modulation, live: where the voice has its mouth knobs now (0..1: a sung or spoken phoneme
+     * moves them, pad pressure along the Vowel path, the knobs themselves), and in Vowel mode the
+     * Vowel knob where pressure pushes it; {} while the voice is silent. From what the render
+     * thread published: no waiting on it. */
+    if (!strcmp(key, "live_mod")) {
+        if (!atomic_load_explicit(&in->live_on, memory_order_relaxed)) return snprintf(buf, (size_t)len, "{}");
+        char tmp[1024];
+        int n = 0;
+        for (int id = 0; id < CP_COUNT; ++id) {
+            double x = bitsd(atomic_load_explicit(&in->live[id], memory_order_relaxed));
+            if (isfinite(x)) n += snprintf(tmp + n, sizeof tmp - (size_t)n, "%s\"%s\":%.4f", n ? "," : "{", cp_params[id].key, x);
+        }
+        if ((int)in->val[CP_MODE] == CP_MODE_VOWEL)
+            n += snprintf(tmp + n, sizeof tmp - (size_t)n, "%s\"sweep\":%.4f", n ? "," : "{",
+                          clampf(in->val[CP_SWEEP] + in->val[CP_PRESS_AMT] * pressure_now(in), 0.0f, 1.0f));
+        return snprintf(buf, (size_t)len, "%s}", n ? tmp : "{");
+    }
     if (!strcmp(key, "chm_view")) return get_view(in, buf, len);
     int id = find_param(key);
     if (id < 0) return -1;

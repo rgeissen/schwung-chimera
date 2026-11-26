@@ -461,6 +461,20 @@ impl Chimera {
         n
     }
 
+    /// Modulation, live (the plugin's `live_mod`): per param id, where the voice has that mouth
+    /// knob now: the engine's articulator as it moves (a sung or spoken phoneme, pad pressure along
+    /// the Vowel path, the knob itself) taken back to the knob's 0..1 (the inverse of
+    /// `Drive::Artic`'s lo + v * (hi - lo)); NaN for the params that are not mouth knobs.
+    pub fn live_artic(&self, out: &mut [f64]) {
+        let x = &self.eng.voice().artic.x;
+        for (id, o) in out.iter_mut().enumerate().take(N_PARAMS) {
+            *o = match DRIVES[id] {
+                Drive::Artic(k, lo, hi) if hi != lo => ((x.get(ArticKey::ALL[k]) - lo) / (hi - lo)).clamp(0.0, 1.0),
+                _ => f64::NAN,
+            };
+        }
+    }
+
     /// The syllable the next key sings (Sing mode).
     pub fn cursor(&self) -> usize {
         self.sing.cursor()
@@ -656,6 +670,26 @@ pub unsafe extern "C" fn chm_take_published(h: *mut Handle, ids: *mut u32, vals:
     let (ids, vals) = unsafe { (std::slice::from_raw_parts_mut(ids, max), std::slice::from_raw_parts_mut(vals, max)) };
     let mut n = 0;
     guard(h, |c| n = c.take_published(ids, vals));
+    n
+}
+
+/// Modulation, live: per param id the mouth knob where the voice has it (see
+/// `Chimera::live_artic`), NaN for the rest. Returns how many were written.
+///
+/// # Safety
+/// `h` is live; `out` holds `max` doubles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chm_live_mod(h: *mut Handle, out: *mut f64, max: usize) -> usize {
+    if out.is_null() {
+        return 0;
+    }
+    let out = unsafe { std::slice::from_raw_parts_mut(out, max) };
+    let mut n = 0;
+    guard(h, |c| {
+        let m = out.len().min(N_PARAMS);
+        c.live_artic(&mut out[..m]);
+        n = m;
+    });
     n
 }
 

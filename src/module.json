@@ -2,7 +2,7 @@
  "id": "chimera",
  "name": "Schimera",
  "abbrev": "SCHIM",
- "version": "0.6.1",
+ "version": "0.6.1.1",
  "description": "A physically modeled human voice: every sound comes from a simulated airway (lungs, vocal folds, tongue, lips, nose), not samples. Speak a line of text at a key's pitch, sing it a syllable per key, or play a held vowel and sweep it with pad pressure. Port of jamesondh's CHIMERA engine, lightened to run on the Move.",
  "author": "legsmechanical (engine: Jameson Hodge / CHIMERA)",
  "license": "MIT",
